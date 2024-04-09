@@ -25,7 +25,7 @@ add_shader_input(name: str, value) updates shader input
 ```
 Keep in mind I didn't port anything to glsl so you still need to use Nvidia's CG.
 
-Example
+### Example
 ```python
 from CommonFilters import CommonFilters
 from direct.showbase.ShowBase import ShowBase
