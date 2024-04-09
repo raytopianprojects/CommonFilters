@@ -111,11 +111,12 @@ class CommonFilters:
     filters.  The constructor requires a filter builder as a parameter. """
 
     def __init__(self, win, cam):
+        self.current_text = None
         self.manager = FilterManager(win, cam)
         self.configuration = {}
         self.task = None
         self.cleanup()
-        self.filters = []
+        self.filters = {}
         self.uniforms = []
         self.shader_inputs = {}
 
@@ -131,18 +132,19 @@ class CommonFilters:
             taskMgr.remove(self.task)
             self.task = None
 
-    def add_filter(self, string, order=None):
+    def add_filter(self, name, string, order=None):
         if order:
-            self.filters.insert(order, string)
+            self.filters[name] = [string, order]
         else:
-            self.filters.append(string)
+            self.filters[name] = [string, len(self.filters)]
         self.reconfigure(True, None)
 
     def load_filter(self, file, order):
         if order:
-            self.filters.insert(order, vfs.get_file(file))
+            self.filters[name] = [vfs.get_file(file), order]
         else:
-            self.filters.append(string)
+            self.filters[name] = [vfs.get_file(file), len(self.filters)]
+
         self.reconfigure(True, None)
 
     def add_uniform(self, string):
@@ -153,8 +155,17 @@ class CommonFilters:
         del self.uniforms[index]
         self.reconfigure(True, None)
 
-    def remove_filter(self, index):
-        del self.filters[index]
+    def remove_filter(self, name, inputs=None, uniforms=None):
+        if name in self.filters:
+            del self.filters[name]
+        if inputs:
+            for name in inputs:
+                if name in self.shader_inputs:
+                    del self.shader_inputs[name]
+        if uniforms:
+            for uniform in uniforms:
+                if uniform in self.uniforms:
+                    self.uniforms.remove(uniform)
         self.reconfigure(True, None)
 
     def add_shader_inputs(self, inputs):
@@ -304,20 +315,20 @@ class CommonFilters:
                 self.bloom[3].setShaderInput("src", bloom2)
                 self.bloom[3].setShader(Shader.make(BLOOM_Y, Shader.SL_Cg))
 
-            texcoords = {}
-            texcoordPadding = {}
+            self.texcoords = {}
+            self.texcoordPadding = {}
 
             for tex in needtexcoord:
                 if self.textures[tex].getAutoTextureScale() != ATSNone or \
                         "HalfPixelShift" in configuration:
-                    texcoords[tex] = "l_texcoord_" + tex
-                    texcoordPadding["l_texcoord_" + tex] = tex
+                    self.texcoords[tex] = "l_texcoord_" + tex
+                    self.texcoordPadding["l_texcoord_" + tex] = tex
                 else:
                     # Share unpadded texture coordinates.
-                    texcoords[tex] = "l_texcoord"
-                    texcoordPadding["l_texcoord"] = None
+                    self.texcoords[tex] = "l_texcoord"
+                    self.texcoordPadding["l_texcoord"] = None
 
-            texcoordSets = list(enumerate(texcoordPadding.keys()))
+            texcoordSets = list(enumerate(self.texcoordPadding.keys()))
 
             text = "//Cg\n"
 
@@ -336,7 +347,7 @@ class CommonFilters:
             text += "void vshader(float4 vtx_position : POSITION,\n"
             text += "  out float4 l_position : POSITION,\n"
 
-            for texcoord, padTex in texcoordPadding.items():
+            for texcoord, padTex in self.texcoordPadding.items():
                 if padTex is not None:
                     text += "  uniform float4 texpad_tx%s,\n" % (padTex)
                     if "HalfPixelShift" in configuration:
@@ -357,7 +368,7 @@ class CommonFilters:
             else:
                 pos = "vtx_position.xy"
 
-            for texcoord, padTex in texcoordPadding.items():
+            for texcoord, padTex in self.texcoordPadding.items():
                 if padTex is None:
                     text += "  %s = %s * float2(0.5, 0.5) + float2(0.5, 0.5);\n" % (texcoord, pos)
                 else:
@@ -392,31 +403,33 @@ class CommonFilters:
                 text += "  uniform float k_exposure,\n"
 
             for uniform in self.uniforms:
-                text += uniform
+                text += f"uniform {uniform},\n"
 
             text += "  out float4 o_color : COLOR)\n"
             text += "{\n"
 
-            text += "  o_color = tex2D(k_txcolor, %s);\n" % (texcoords["color"])
+            text += "  o_color = tex2D(k_txcolor, %s);\n" % (self.texcoords["color"])
 
-            for string in self.filters:
-                text += string
+            user_filters = sorted(self.filters.values(), key=lambda l: l[1])
+            print(user_filters)
+            for user_filter in user_filters:
+                text += user_filter[0]
 
             if "CartoonInk" in configuration:
-                text += CARTOON_BODY % {"texcoord": texcoords["aux"]}
+                text += CARTOON_BODY % {"texcoord": self.texcoords["aux"]}
             if "AmbientOcclusion" in configuration:
-                text += "  o_color *= tex2D(k_txssao2, %s).r;\n" % (texcoords["ssao2"])
+                text += "  o_color *= tex2D(k_txssao2, %s).r;\n" % (self.texcoords["ssao2"])
             if "BlurSharpen" in configuration:
-                text += "  o_color = lerp(tex2D(k_txblur1, %s), o_color, k_blurval.x);\n" % (texcoords["blur1"])
+                text += "  o_color = lerp(tex2D(k_txblur1, %s), o_color, k_blurval.x);\n" % (self.texcoords["blur1"])
             if "Bloom" in configuration:
                 text += "  o_color = saturate(o_color);\n"
-                text += "  float4 bloom = 0.5 * tex2D(k_txbloom3, %s);\n" % (texcoords["bloom3"])
+                text += "  float4 bloom = 0.5 * tex2D(k_txbloom3, %s);\n" % (self.texcoords["bloom3"])
                 text += "  o_color = 1-((1-bloom)*(1-o_color));\n"
             if "ViewGlow" in configuration:
                 text += "  o_color.r = o_color.a;\n"
             if "VolumetricLighting" in configuration:
                 text += "  float decay = 1.0f;\n"
-                text += "  float2 curcoord = %s;\n" % (texcoords["color"])
+                text += "  float2 curcoord = %s;\n" % (self.texcoords["color"])
                 text += "  float2 lightdir = curcoord - k_casterpos.xy;\n"
                 text += "  lightdir *= k_vlparams.x;\n"
                 text += "  half4 sample = tex2D(k_txcolor, curcoord);\n"
@@ -455,6 +468,8 @@ class CommonFilters:
             if "Inverted" in configuration:
                 text += "  o_color = float4(1, 1, 1, 1) - o_color;\n"
             text += "}\n"
+
+            self.current_text = text
 
             shader = Shader.make(text, Shader.SL_Cg)
             if not shader:
@@ -768,6 +783,34 @@ class CommonFilters:
             return self.reconfigure(True, "ExposureAdjust")
         return True
 
+    def set_chromatic_aberration(self, r=(0, 0), g=(0, 0), b=(0, 0)):
+
+        self.add_uniform("float2 chromatic_offset_r")
+        self.add_uniform("float2 chromatic_offset_g")
+        self.add_uniform("float2 chromatic_offset_b")
+
+        coords = self.texcoords["color"]
+        self.add_filter("chromatic aberration", f"""
+        float2 r_coords = {coords}.xy + chromatic_offset_r;
+        float r = tex2D(k_txcolor, r_coords).r;
+        float2 g_coords = {coords}.xy + chromatic_offset_g;
+        float g = tex2D(k_txcolor, g_coords).g;
+        float2 b_coords = {coords}.xy + chromatic_offset_b;
+        float b = tex2D(k_txcolor, b_coords).b;
+        o_color = float4(r,g,b, 1.0);""")
+
+        self.add_shader_inputs({"chromatic_offset_r": r, "chromatic_offset_g": g, "chromatic_offset_b": b})
+        self.reconfigure(True, None)
+
+    def del_chromatic_aberration(self):
+        self.remove_filter("chromatic aberration", ["chromatic_offset_r",
+                                                    "chromatic_offset_g",
+                                                    "chromatic_offset_b"], ["float2 chromatic_offset_g",
+                                                                            "float2 chromatic_offset_g",
+                                                                            "float2 chromatic_offset_b"])
+
+        self.reconfigure(True, None)
+
     #snake_case alias:
     set_msaa = setMSAA
     del_msaa = delMSAA
@@ -799,18 +842,28 @@ class CommonFilters:
 
 if __name__ == "__main__":
     from direct.showbase.ShowBase import ShowBase
+
     s = ShowBase()
     p = s.loader.load_model("panda")
+    p.set_pos((0, 100, 0))
     p.reparent_to(s.render)
     c = CommonFilters(s.win, s.cam)
     c.setBlurSharpen(0.5)
 
-    c.add_uniform("uniform float raise_amount,")
-    c.add_shader_inputs({"raise_amount": 0.5})
-    c.add_filter("""o_color += 0.5 * raise_amount;""", 0)
+    c.add_uniform("float raise_amount")
+    c.add_shader_inputs({"raise_amount": 0.1})
+    c.add_filter("raise amount", "o_color += 0.5 * raise_amount;", 0)
 
-    c.add_uniform("uniform float increase_red,")
-    c.add_shader_input("increase_red", 0.5)
-    c.add_filter("""o_color.r += increase_red;""", 0)
+    c.add_uniform("float increase_red")
+    c.add_shader_input("increase_red", 0.1)
+    c.add_filter("increase red", "o_color.r += increase_red;", 0)
 
+    c.setSrgbEncode()
+    c.set_high_dynamic_range()
+
+    c.set_chromatic_aberration((0.006, 0.006), (0.008, 0.008), (0.01, 0.01))
+    for count, line in enumerate(c.current_text.split("\n")):
+        print(count, line)
+
+    s.accept("c", c.del_chromatic_aberration)
     s.run()
