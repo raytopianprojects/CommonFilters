@@ -45,5 +45,10 @@ c.add_filter("""o_color.r += increase_red;""", 0)
 
 s.run()
 ```
+
+Should look like this
+![image](https://github.com/raytopianprojects/CommonFilters/assets/54505044/9ced3882-5ba6-4534-97af-749b6c459c44)
+
+
 ## Todo
 I'll probably add support for reording the builtin filters as well but that'll be later. Also probably will auto append uniform and a comma to the add_uniform string input.
