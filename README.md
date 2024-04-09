@@ -47,6 +47,7 @@ s.run()
 ```
 
 Should look like this
+
 ![image](https://github.com/raytopianprojects/CommonFilters/assets/54505044/9ced3882-5ba6-4534-97af-749b6c459c44)
 
 
