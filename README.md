@@ -7,12 +7,19 @@ It appends the code you've added to CommonFilters internal shader string before 
 ## Usage
 This version of common filters adds the methods add_filter, load_filter, add_uniform, remove_uniform, remove_filter, add_shader_input, and add_shader_inputs.
 
+### Functions
 add_filter(string: str, order:int = None) takes in a string and optionally the order where it should be.
+
 load_filter(file: str, order:int = None) loads a file from disk and then see add_filter.
+
 add_uniform(string: str) adds a uniform(s).
+
 remove_uniform(index: int) removes uniform(s) from the stored uniform list.
+
 remove_filter(index: int) removes uniform(s) from the stored uniform list.
+
 add_shader_inputs(inputs: dict) updates shader inputs
+
 add_shader_input(name: str, value) updates shader input
 
 Keep in mind I didn't port anything to glsl so you still need to use Nvidia's CG.
