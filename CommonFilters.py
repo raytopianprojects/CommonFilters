@@ -131,12 +131,18 @@ class CommonFilters:
             taskMgr.remove(self.task)
             self.task = None
 
-    def add_filter(self, string, order):
-        self.filters.insert(order, string)
+    def add_filter(self, string, order=None):
+        if order:
+            self.filters.insert(order, string)
+        else:
+            self.filters.append(string)
         self.reconfigure(True, None)
 
     def load_filter(self, file, order):
-        self.filters.insert(order, vfs.get_file(file))
+        if order:
+            self.filters.insert(order, vfs.get_file(file))
+        else:
+            self.filters.append(string)
         self.reconfigure(True, None)
 
     def add_uniform(self, string):
@@ -151,12 +157,13 @@ class CommonFilters:
         del self.filters[index]
         self.reconfigure(True, None)
 
-    def add_shader_input(self, inputs):
+    def add_shader_inputs(self, inputs):
         self.shader_inputs.update(inputs)
         self.reconfigure(True, None)
 
-    def shader_input(self, name, value):
-        self.finalQuad.setShaderInput(name, value)
+    def add_shader_input(self, name, value):
+        self.shader_inputs[name] = value
+        self.reconfigure(True, None)
 
     def reconfigure(self, fullrebuild, changed):
         """ Reconfigure is called whenever any configuration change is made. """
@@ -799,11 +806,11 @@ if __name__ == "__main__":
     c.setBlurSharpen(0.5)
 
     c.add_uniform("uniform float raise_amount,")
-    c.add_shader_input({"raise_amount": 0.5})
+    c.add_shader_inputs({"raise_amount": 0.5})
     c.add_filter("""o_color += 0.5 * raise_amount;""", 0)
 
     c.add_uniform("uniform float increase_red,")
-    c.add_shader_input({"increase_red": 0.5})
+    c.add_shader_input("increase_red", 0.5)
     c.add_filter("""o_color.r += increase_red;""", 0)
 
     s.run()
