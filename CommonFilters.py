@@ -131,7 +131,6 @@ class CommonFilters:
         self.blur = []
         self.ssao = []
 
-
         if self.task is not None:
             taskMgr.remove(self.task)
             self.task = None
@@ -145,7 +144,7 @@ class CommonFilters:
 
         if uniforms:
             for uniform in uniforms:
-                self.add_uniform(uniform)
+                self.add_uniform(uniform, reconfigure=False)
 
         if is_filepath:
             if order:
@@ -159,14 +158,15 @@ class CommonFilters:
                 self.filters[name] = [shader_string, len(self.filters)]
 
         if shader_inputs:
-            self.set_shader_inputs(shader_inputs)
+            self.set_shader_inputs(shader_inputs, reconfigure=False)
 
         self.reconfigure(True, None, needed_textures=needed_textures, needed_coords=needed_coords,
                          render_into=render_into)
 
-    def add_uniform(self, string):
+    def add_uniform(self, string, reconfigure=True):
         self.uniforms.append(string)
-        self.reconfigure(True, None)
+        if reconfigure:
+            self.reconfigure(True, None)
 
     def del_uniforms(self, uniforms, reconfigure=True):
         for uniform in uniforms:
@@ -184,13 +184,15 @@ class CommonFilters:
 
         self.reconfigure(True, None)
 
-    def set_shader_inputs(self, inputs):
+    def set_shader_inputs(self, inputs, reconfigure=True):
         self.shader_inputs.update(inputs)
-        self.reconfigure(True, None)
+        if reconfigure:
+            self.reconfigure(True, None)
 
-    def set_shader_input(self, name, value):
+    def set_shader_input(self, name, value, reconfigure=True):
         self.shader_inputs[name] = value
-        self.reconfigure(True, None)
+        if reconfigure:
+            self.reconfigure(True, None)
 
     def del_shader_inputs(self, inputs, reconfigure=True):
         for input in inputs:
@@ -204,7 +206,6 @@ class CommonFilters:
 
         if fullrebuild:
             self.cleanup()
-
 
             if not self.manager.win.gsg.getSupportsBasicShaders():
                 return False
@@ -327,7 +328,6 @@ class CommonFilters:
                                 if "texture" in value:
                                     value = self.textures[value["texture"]]
                             quad.set_shader_input(name, value)
-
 
             if "MSAA" in configuration:
                 camNode = self.manager.camera.node()
@@ -731,29 +731,32 @@ class CommonFilters:
         """Enables the blur/sharpen filter. If the 'amount' parameter is 1.0, it will not have any effect.
         A value of 0.0 means fully blurred, and a value higher than 1.0 sharpens the image."""
 
-        self.load_filter("BlurSharpen",
-                         "  o_color = lerp(tex2D(k_txblur1, l_texcoord_blur1), o_color, k_blurval.x);\n",
-                         shader_inputs={"blurval": LVecBase4(amount, amount, amount, amount)},
-                         uniforms=["float4 k_blurval"], needed_textures=["blur0", "blur1"], needed_coords=["blur1"],
-                         render_into={
-                             "filter-blur0": {
-                                 "colortex": {"texture": "blur0"},
-                                 "div": 2,
-                                 "shader_inputs": {
-                                     "src": {"texture": "color"}
-                                 },
-                                 "shader": Shader.make(BLUR_X, Shader.SL_Cg)
-                             },
-                             "filter-blur1": {
-                                 "colortex": {"texture": "blur1"},
-                                 "shader_inputs":
-                                     {
-                                         "src": {"texture": "blur0"}
-                                     },
-                                 "shader": Shader.make(BLUR_Y, Shader.SL_Cg)
-                             }
-                         })
-
+        self.load_filter(
+            "BlurSharpen",
+            "  o_color = lerp(tex2D(k_txblur1, l_texcoord_blur1), o_color, k_blurval.x);\n",
+            shader_inputs={"blurval": LVecBase4(amount, amount, amount, amount)},
+            uniforms=["float4 k_blurval"],
+            needed_textures=["blur0", "blur1"],
+            needed_coords=["blur1"],
+            render_into={
+                "filter-blur0": {
+                    "colortex": {"texture": "blur0"},
+                    "div": 2,
+                    "shader_inputs": {
+                        "src": {"texture": "color"}
+                    },
+                    "shader": Shader.make(BLUR_X, Shader.SL_Cg)
+                },
+                "filter-blur1": {
+                    "colortex": {"texture": "blur1"},
+                    "shader_inputs":
+                        {
+                            "src": {"texture": "blur0"}
+                        },
+                    "shader": Shader.make(BLUR_Y, Shader.SL_Cg)
+                }
+            }
+        )
 
     def delBlurSharpen(self):
         # TODO Del Filter
