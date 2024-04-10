@@ -111,6 +111,8 @@ class CommonFilters:
     filters.  The constructor requires a filter builder as a parameter. """
 
     def __init__(self, win, cam):
+        self.texcoordPadding = None
+        self.texcoords = None
         self.current_text = None
         self.manager = FilterManager(win, cam)
         self.configuration = {}
@@ -119,6 +121,7 @@ class CommonFilters:
         self.filters = {}
         self.uniforms = []
         self.shader_inputs = {}
+        self.render_textures = {}
 
     def cleanup(self):
         self.manager.cleanup()
@@ -128,64 +131,80 @@ class CommonFilters:
         self.blur = []
         self.ssao = []
 
+
         if self.task is not None:
             taskMgr.remove(self.task)
             self.task = None
 
-    def add_filter(self, name, string, order=None):
-        if order:
-            self.filters[name] = [string, order]
-        else:
-            self.filters[name] = [string, len(self.filters)]
-        self.reconfigure(True, None)
+    def load_filter(self, name, shader_string, uniforms=None,
+                    shader_inputs=None,
+                    needed_textures=None,
+                    needed_coords=None,
+                    render_into=None,
+                    is_filepath=False, order=None):
 
-    def load_filter(self, file, order):
-        if order:
-            self.filters[name] = [vfs.get_file(file), order]
-        else:
-            self.filters[name] = [vfs.get_file(file), len(self.filters)]
+        if uniforms:
+            for uniform in uniforms:
+                self.add_uniform(uniform)
 
-        self.reconfigure(True, None)
+        if is_filepath:
+            if order:
+                self.filters[name] = [vfs.get_file(shader_string), order]
+            else:
+                self.filters[name] = [vfs.get_file(shader_string), len(self.filters)]
+        else:
+            if order:
+                self.filters[name] = [shader_string, order]
+            else:
+                self.filters[name] = [shader_string, len(self.filters)]
+
+        if shader_inputs:
+            self.set_shader_inputs(shader_inputs)
+
+        self.reconfigure(True, None, needed_textures=needed_textures, needed_coords=needed_coords,
+                         render_into=render_into)
 
     def add_uniform(self, string):
         self.uniforms.append(string)
         self.reconfigure(True, None)
 
-    def remove_uniform(self, index):
-        del self.uniforms[index]
-        self.reconfigure(True, None)
+    def del_uniforms(self, uniforms, reconfigure=True):
+        for uniform in uniforms:
+            if uniform in self.uniforms:
+                self.uniforms.remove(uniform)
+        self.reconfigure(reconfigure, None)
 
-    def remove_filter(self, name, inputs=None, uniforms=None):
+    def del_filter(self, name, inputs=None, uniforms=None):
         if name in self.filters:
             del self.filters[name]
         if inputs:
-            for name in inputs:
-                if name in self.shader_inputs:
-                    del self.shader_inputs[name]
+            self.del_shader_inputs(inputs, reconfigure=False)
         if uniforms:
-            for uniform in uniforms:
-                if uniform in self.uniforms:
-                    self.uniforms.remove(uniform)
+            self.del_uniforms(uniforms, reconfigure=False)
+
         self.reconfigure(True, None)
 
-    def add_shader_inputs(self, inputs):
+    def set_shader_inputs(self, inputs):
         self.shader_inputs.update(inputs)
         self.reconfigure(True, None)
 
-    def add_shader_input(self, name, value):
+    def set_shader_input(self, name, value):
         self.shader_inputs[name] = value
         self.reconfigure(True, None)
 
-    def reconfigure(self, fullrebuild, changed):
-        """ Reconfigure is called whenever any configuration change is made. """
+    def del_shader_inputs(self, inputs, reconfigure=True):
+        for input in inputs:
+            if input in self.shader_inputs:
+                del self.shader_inputs[input]
+        self.reconfigure(reconfigure, None)
 
+    def reconfigure(self, fullrebuild, changed, needed_textures=None, needed_coords=None, render_into=None):
+        """ Reconfigure is called whenever any configuration change is made. """
         configuration = self.configuration
 
         if fullrebuild:
             self.cleanup()
 
-            if len(configuration) == 0:
-                return
 
             if not self.manager.win.gsg.getSupportsBasicShaders():
                 return False
@@ -193,6 +212,14 @@ class CommonFilters:
             auxbits = 0
             needtex = {"color"}
             needtexcoord = {"color"}
+
+            if needed_textures:
+                for texture in needed_textures:
+                    needtex.add(texture)
+
+            if needed_coords:
+                for coords in needed_coords:
+                    needtexcoord.add(coords)
 
             if "CartoonInk" in configuration:
                 needtex.add("aux")
@@ -207,11 +234,6 @@ class CommonFilters:
                 needtex.add("aux")
                 auxbits |= AuxBitplaneAttrib.ABOAuxNormal
                 needtexcoord.add("ssao2")
-
-            if "BlurSharpen" in configuration:
-                needtex.add("blur0")
-                needtex.add("blur1")
-                needtexcoord.add("blur1")
 
             if "Bloom" in configuration:
                 needtex.add("bloom0")
@@ -251,21 +273,67 @@ class CommonFilters:
                 self.cleanup()
                 return False
 
+            if render_into:
+                for render_name, settings in render_into.items():
+
+                    mul = settings.get("mul")
+                    if not mul:
+                        mul = 1
+
+                    div = settings.get("div")
+                    if not div:
+                        div = 1
+
+                    align = settings.get("align")
+                    if not align:
+                        align = 1
+
+                    depthtex = settings.get("depthtex")
+                    if type(depthtex) is dict:
+                        depthtex = self.textures[depthtex["texture"]]
+
+                    colortex = settings.get("colortex")
+                    if type(colortex) is dict:
+                        colortex = self.textures[colortex["texture"]]
+
+                    auxtex0 = settings.get("auxtex0")
+                    if type(auxtex0) is dict:
+                        auxtex0 = self.textures[auxtex0["texture"]]
+
+                    auxtex1 = settings.get("auxtex1")
+                    if type(auxtex1) is dict:
+                        auxtex1 = self.textures[auxtex1["texture"]]
+
+                    fbprops = settings.get("fbprops")
+
+                    quad = self.manager.renderQuadInto(render_name,
+                                                       mul=mul,
+                                                       align=align,
+                                                       div=div,
+                                                       depthtex=depthtex,
+                                                       colortex=colortex,
+                                                       auxtex0=auxtex0,
+                                                       auxtex1=auxtex1,
+                                                       fbprops=fbprops)
+
+                    shader = settings.get("shader")
+                    if shader:
+                        quad.set_shader(shader)
+
+                    shader_inputs = settings.get("shader_inputs")
+                    if shader_inputs:
+                        for name, value in shader_inputs.items():
+                            if type(value) is dict:
+                                if "texture" in value:
+                                    value = self.textures[value["texture"]]
+                            quad.set_shader_input(name, value)
+
+
             if "MSAA" in configuration:
                 camNode = self.manager.camera.node()
                 state = camNode.getInitialState()
                 state.setAttrib(AntialiasAttrib.make(AntialiasAttrib.M_multisample))
                 camNode.setInitialState(state)
-
-            if "BlurSharpen" in configuration:
-                blur0 = self.textures["blur0"]
-                blur1 = self.textures["blur1"]
-                self.blur.append(self.manager.renderQuadInto("filter-blur0", colortex=blur0, div=2))
-                self.blur.append(self.manager.renderQuadInto("filter-blur1", colortex=blur1))
-                self.blur[0].setShaderInput("src", self.textures["color"])
-                self.blur[0].setShader(Shader.make(BLUR_X, Shader.SL_Cg))
-                self.blur[1].setShaderInput("src", blur0)
-                self.blur[1].setShader(Shader.make(BLUR_Y, Shader.SL_Cg))
 
             if "AmbientOcclusion" in configuration:
                 ssao0 = self.textures["ssao0"]
@@ -318,6 +386,7 @@ class CommonFilters:
             self.texcoords = {}
             self.texcoordPadding = {}
 
+            print(needtexcoord)
             for tex in needtexcoord:
                 if self.textures[tex].getAutoTextureScale() != ATSNone or \
                         "HalfPixelShift" in configuration:
@@ -327,7 +396,9 @@ class CommonFilters:
                     # Share unpadded texture coordinates.
                     self.texcoords[tex] = "l_texcoord"
                     self.texcoordPadding["l_texcoord"] = None
+                print(tex)
 
+            print(self.texcoords)
             texcoordSets = list(enumerate(self.texcoordPadding.keys()))
 
             text = "//Cg\n"
@@ -392,9 +463,6 @@ class CommonFilters:
                 text += "  uniform float4 k_cartooncolor,\n"
                 text += "  uniform float4 texpix_txaux,\n"
 
-            if "BlurSharpen" in configuration:
-                text += "  uniform float4 k_blurval,\n"
-
             if "VolumetricLighting" in configuration:
                 text += "  uniform float4 k_casterpos,\n"
                 text += "  uniform float4 k_vlparams,\n"
@@ -411,7 +479,6 @@ class CommonFilters:
             text += "  o_color = tex2D(k_txcolor, %s);\n" % (self.texcoords["color"])
 
             user_filters = sorted(self.filters.values(), key=lambda l: l[1])
-            print(user_filters)
             for user_filter in user_filters:
                 text += user_filter[0]
 
@@ -419,8 +486,6 @@ class CommonFilters:
                 text += CARTOON_BODY % {"texcoord": self.texcoords["aux"]}
             if "AmbientOcclusion" in configuration:
                 text += "  o_color *= tex2D(k_txssao2, %s).r;\n" % (self.texcoords["ssao2"])
-            if "BlurSharpen" in configuration:
-                text += "  o_color = lerp(tex2D(k_txblur1, %s), o_color, k_blurval.x);\n" % (self.texcoords["blur1"])
             if "Bloom" in configuration:
                 text += "  o_color = saturate(o_color);\n"
                 text += "  float4 bloom = 0.5 * tex2D(k_txbloom3, %s);\n" % (self.texcoords["bloom3"])
@@ -486,11 +551,6 @@ class CommonFilters:
                 self.finalQuad.setShaderInput("cartoonseparation", LVecBase4(c.separation, 0, c.separation, 0))
                 self.finalQuad.setShaderInput("cartooncolor", c.color)
 
-        if changed == "BlurSharpen" or fullrebuild:
-            if "BlurSharpen" in configuration:
-                blurval = configuration["BlurSharpen"]
-                self.finalQuad.setShaderInput("blurval", LVecBase4(blurval, blurval, blurval, blurval))
-
         if changed == "Bloom" or fullrebuild:
             if "Bloom" in configuration:
                 bloomconf = configuration["Bloom"]
@@ -519,7 +579,7 @@ class CommonFilters:
             if "ExposureAdjust" in configuration:
                 stops = configuration["ExposureAdjust"]
                 self.finalQuad.setShaderInput("exposure", 2 ** stops)
-
+        print(self.shader_inputs)
         self.finalQuad.setShaderInputs(**self.shader_inputs)
 
         self.update()
@@ -670,11 +730,33 @@ class CommonFilters:
     def setBlurSharpen(self, amount=0.0):
         """Enables the blur/sharpen filter. If the 'amount' parameter is 1.0, it will not have any effect.
         A value of 0.0 means fully blurred, and a value higher than 1.0 sharpens the image."""
-        fullrebuild = ("BlurSharpen" not in self.configuration)
-        self.configuration["BlurSharpen"] = amount
-        return self.reconfigure(fullrebuild, "BlurSharpen")
+
+        self.load_filter("BlurSharpen",
+                         "  o_color = lerp(tex2D(k_txblur1, l_texcoord_blur1), o_color, k_blurval.x);\n",
+                         shader_inputs={"blurval": LVecBase4(amount, amount, amount, amount)},
+                         uniforms=["float4 k_blurval"], needed_textures=["blur0", "blur1"], needed_coords=["blur1"],
+                         render_into={
+                             "filter-blur0": {
+                                 "colortex": {"texture": "blur0"},
+                                 "div": 2,
+                                 "shader_inputs": {
+                                     "src": {"texture": "color"}
+                                 },
+                                 "shader": Shader.make(BLUR_X, Shader.SL_Cg)
+                             },
+                             "filter-blur1": {
+                                 "colortex": {"texture": "blur1"},
+                                 "shader_inputs":
+                                     {
+                                         "src": {"texture": "blur0"}
+                                     },
+                                 "shader": Shader.make(BLUR_Y, Shader.SL_Cg)
+                             }
+                         })
+
 
     def delBlurSharpen(self):
+        # TODO Del Filter
         if "BlurSharpen" in self.configuration:
             del self.configuration["BlurSharpen"]
             return self.reconfigure(True, "BlurSharpen")
@@ -783,24 +865,26 @@ class CommonFilters:
             return self.reconfigure(True, "ExposureAdjust")
         return True
 
-    def set_chromatic_aberration(self, r=(0, 0), g=(0, 0), b=(0, 0)):
-
-        self.add_uniform("float2 chromatic_offset_r")
-        self.add_uniform("float2 chromatic_offset_g")
-        self.add_uniform("float2 chromatic_offset_b")
+    def set_chromatic_aberration(self, r=1.07, g=1.05, b=1.1):
 
         coords = self.texcoords["color"]
-        self.add_filter("chromatic aberration", f"""
-        float2 r_coords = {coords}.xy + chromatic_offset_r;
+        self.load_filter(
+            "chromatic aberration",
+            f"""
+        float2 r_coords = {coords}.xy * chromatic_offset_r;
         float r = tex2D(k_txcolor, r_coords).r;
-        float2 g_coords = {coords}.xy + chromatic_offset_g;
+        float2 g_coords = {coords}.xy * chromatic_offset_g;
         float g = tex2D(k_txcolor, g_coords).g;
-        float2 b_coords = {coords}.xy + chromatic_offset_b;
+        float2 b_coords = {coords}.xy * chromatic_offset_b;
         float b = tex2D(k_txcolor, b_coords).b;
-        o_color = float4(r,g,b, 1.0);""")
-
-        self.add_shader_inputs({"chromatic_offset_r": r, "chromatic_offset_g": g, "chromatic_offset_b": b})
-        self.reconfigure(True, None)
+        o_color = float4(r,g,b, o_color.a);""",
+            uniforms=[
+                "float chromatic_offset_r",
+                "float chromatic_offset_g",
+                "float chromatic_offset_b"
+            ],
+            shader_inputs={"chromatic_offset_r": r, "chromatic_offset_g": g, "chromatic_offset_b": b}
+        )
 
     def del_chromatic_aberration(self):
         self.remove_filter("chromatic aberration", ["chromatic_offset_r",
@@ -808,8 +892,6 @@ class CommonFilters:
                                                     "chromatic_offset_b"], ["float2 chromatic_offset_g",
                                                                             "float2 chromatic_offset_g",
                                                                             "float2 chromatic_offset_b"])
-
-        self.reconfigure(True, None)
 
     #snake_case alias:
     set_msaa = setMSAA
@@ -850,18 +932,18 @@ if __name__ == "__main__":
     c = CommonFilters(s.win, s.cam)
     c.setBlurSharpen(0.5)
 
-    c.add_uniform("float raise_amount")
-    c.add_shader_inputs({"raise_amount": 0.1})
-    c.add_filter("raise amount", "o_color += 0.5 * raise_amount;", 0)
+    #c.add_uniform("float raise_amount")
+    #c.add_shader_inputs({"raise_amount": 0.1})
+    #c.add_filter("raise amount", "o_color += 0.5 * raise_amount;", 0)
 
-    c.add_uniform("float increase_red")
-    c.add_shader_input("increase_red", 0.1)
-    c.add_filter("increase red", "o_color.r += increase_red;", 0)
+    #c.add_uniform("float increase_red")
+    #c.add_shader_input("increase_red", 0.1)
+    #c.add_filter("increase red", "o_color.r += increase_red;", 0)
 
-    c.setSrgbEncode()
-    c.set_high_dynamic_range()
+    #c.setSrgbEncode()
+    #c.set_high_dynamic_range()
 
-    c.set_chromatic_aberration((0.006, 0.006), (0.008, 0.008), (0.01, 0.01))
+    #c.set_chromatic_aberration((0.006, 0.006), (0.008, 0.008), (0.01, 0.01))
     for count, line in enumerate(c.current_text.split("\n")):
         print(count, line)
 
