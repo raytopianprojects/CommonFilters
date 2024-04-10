@@ -111,8 +111,10 @@ class CommonFilters:
     filters.  The constructor requires a filter builder as a parameter. """
 
     def __init__(self, win, cam):
-        self.texcoordPadding = None
-        self.texcoords = None
+        self.texcoords = {}
+        self.texcoordPadding = {}
+        self.textures = {}
+
         self.current_text = None
         self.manager = FilterManager(win, cam)
         self.configuration = {}
@@ -125,7 +127,6 @@ class CommonFilters:
 
     def cleanup(self):
         self.manager.cleanup()
-        self.textures = {}
         self.finalQuad = None
         self.bloom = []
         self.blur = []
@@ -383,22 +384,19 @@ class CommonFilters:
                 self.bloom[3].setShaderInput("src", bloom2)
                 self.bloom[3].setShader(Shader.make(BLOOM_Y, Shader.SL_Cg))
 
-            self.texcoords = {}
-            self.texcoordPadding = {}
 
-            print(needtexcoord)
+
+            print(needtexcoord, "Needtexcoord")
             for tex in needtexcoord:
-                if self.textures[tex].getAutoTextureScale() != ATSNone or \
-                        "HalfPixelShift" in configuration:
+                if self.textures[tex].getAutoTextureScale() != ATSNone or "HalfPixelShift" in configuration:
                     self.texcoords[tex] = "l_texcoord_" + tex
                     self.texcoordPadding["l_texcoord_" + tex] = tex
                 else:
                     # Share unpadded texture coordinates.
                     self.texcoords[tex] = "l_texcoord"
                     self.texcoordPadding["l_texcoord"] = None
-                print(tex)
 
-            print(self.texcoords)
+            print(self.texcoords, "self.texcoords")
             texcoordSets = list(enumerate(self.texcoordPadding.keys()))
 
             text = "//Cg\n"
@@ -579,7 +577,7 @@ class CommonFilters:
             if "ExposureAdjust" in configuration:
                 stops = configuration["ExposureAdjust"]
                 self.finalQuad.setShaderInput("exposure", 2 ** stops)
-        print(self.shader_inputs)
+
         self.finalQuad.setShaderInputs(**self.shader_inputs)
 
         self.update()
@@ -868,18 +866,15 @@ class CommonFilters:
             return self.reconfigure(True, "ExposureAdjust")
         return True
 
-    def set_chromatic_aberration(self, r=1.07, g=1.05, b=1.1):
+    def set_chromatic_aberration(self, r=1.07, g=1.05, b=1.03):
 
         coords = self.texcoords["color"]
         self.load_filter(
             "chromatic aberration",
             f"""
-        float2 r_coords = {coords}.xy * chromatic_offset_r;
-        float r = tex2D(k_txcolor, r_coords).r;
-        float2 g_coords = {coords}.xy * chromatic_offset_g;
-        float g = tex2D(k_txcolor, g_coords).g;
-        float2 b_coords = {coords}.xy * chromatic_offset_b;
-        float b = tex2D(k_txcolor, b_coords).b;
+        float r = tex2D(k_txcolor, {coords}.xy / chromatic_offset_r).r;
+        float g = tex2D(k_txcolor, {coords}.xy / chromatic_offset_g).g;
+        float b = tex2D(k_txcolor, {coords}.xy / chromatic_offset_b).b;
         o_color = float4(r,g,b, o_color.a);""",
             uniforms=[
                 "float chromatic_offset_r",
@@ -943,10 +938,10 @@ if __name__ == "__main__":
     #c.add_shader_input("increase_red", 0.1)
     #c.add_filter("increase red", "o_color.r += increase_red;", 0)
 
-    #c.setSrgbEncode()
-    #c.set_high_dynamic_range()
+    c.setSrgbEncode()
+    c.set_high_dynamic_range()
 
-    #c.set_chromatic_aberration((0.006, 0.006), (0.008, 0.008), (0.01, 0.01))
+    c.set_chromatic_aberration()
     for count, line in enumerate(c.current_text.split("\n")):
         print(count, line)
 
