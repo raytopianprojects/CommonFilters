@@ -131,6 +131,7 @@ class CommonFilters:
         self.bloom = []
         self.blur = []
         self.ssao = []
+        self.render_textures = {}
 
         if self.task is not None:
             taskMgr.remove(self.task)
@@ -318,6 +319,8 @@ class CommonFilters:
                                                        auxtex1=auxtex1,
                                                        fbprops=fbprops)
 
+                    self.render_textures[render_name] = quad
+
                     shader = settings.get("shader")
                     if shader:
                         quad.set_shader(shader)
@@ -384,8 +387,6 @@ class CommonFilters:
                 self.bloom[3].setShaderInput("src", bloom2)
                 self.bloom[3].setShader(Shader.make(BLOOM_Y, Shader.SL_Cg))
 
-
-
             print(needtexcoord, "Needtexcoord")
             for tex in needtexcoord:
                 if self.textures[tex].getAutoTextureScale() != ATSNone or "HalfPixelShift" in configuration:
@@ -415,6 +416,7 @@ class CommonFilters:
 
             text += "void vshader(float4 vtx_position : POSITION,\n"
             text += "  out float4 l_position : POSITION,\n"
+            text += "  out float4 l_fragpos ,\n"
 
             for texcoord, padTex in self.texcoordPadding.items():
                 if padTex is not None:
@@ -446,9 +448,11 @@ class CommonFilters:
                     if "HalfPixelShift" in configuration:
                         text += "  %s += texpix_tx%s.xy * 0.5;\n" % (texcoord, padTex)
 
+            text += "l_fragpos = l_position;"
             text += "}\n"
 
             text += "void fshader(\n"
+            text += "float4 l_fragpos,\n"
 
             for i, name in texcoordSets:
                 text += "  float2 %s : TEXCOORD%d,\n" % (name, i)
@@ -473,7 +477,8 @@ class CommonFilters:
 
             text += "  out float4 o_color : COLOR)\n"
             text += "{\n"
-
+            text += """        l_fragpos /= l_fragpos.w;
+         l_fragpos.xy = (l_fragpos.xy + 1) / 2;"""
             text += "  o_color = tex2D(k_txcolor, %s);\n" % (self.texcoords["color"])
 
             user_filters = sorted(self.filters.values(), key=lambda l: l[1])
@@ -528,8 +533,6 @@ class CommonFilters:
                 text += "  o_color.g = (o_color.g < 0.0031308) ? (o_color.g * 12.92) : (1.055 * pow(o_color.g, 0.41666) - 0.055);\n"
                 text += "  o_color.b = (o_color.b < 0.0031308) ? (o_color.b * 12.92) : (1.055 * pow(o_color.b, 0.41666) - 0.055);\n"
 
-            if "Inverted" in configuration:
-                text += "  o_color = float4(1, 1, 1, 1) - o_color;\n"
             text += "}\n"
 
             self.current_text = text
@@ -694,15 +697,12 @@ class CommonFilters:
         return True
 
     def setInverted(self):
-        fullrebuild = ("Inverted" not in self.configuration)
-        self.configuration["Inverted"] = 1
-        return self.reconfigure(fullrebuild, "Inverted")
+        self.load_filter("Inverted","  o_color = float4(1, 1, 1, 1) - o_color;\n", order=14)
+
+        return self.reconfigure(True, "Inverted")
 
     def delInverted(self):
-        if "Inverted" in self.configuration:
-            del self.configuration["Inverted"]
-            return self.reconfigure(True, "Inverted")
-        return True
+        self.del_filter("Inverted")
 
     def setVolumetricLighting(self, caster, numsamples=32, density=5.0, decay=0.1, exposure=0.1, source="color"):
         oldconfig = self.configuration.get("VolumetricLighting", None)
@@ -786,18 +786,29 @@ class CommonFilters:
 
     def setGammaAdjust(self, gamma):
         """ Applies additional gamma correction to the image.  1.0 = no correction. """
-        old_gamma = self.configuration.get("GammaAdjust", 1.0)
-        if old_gamma != gamma:
-            self.configuration["GammaAdjust"] = gamma
-            return self.reconfigure(True, "GammaAdjust")
-        return True
+
+        if gamma == 0.5:
+            self.load_filter(
+                "GammaAdjust",
+                "  o_color.rgb = sqrt(o_color.rgb);\n"
+            )
+
+        elif gamma == 2.0:
+            self.load_filter(
+                "GammaAdjust",
+                "  o_color.rgb *= o_color.rgb;\n"
+            )
+
+        elif gamma != 1.0:
+            self.load_filter(
+                "GammaAdjust",
+                "  o_color.rgb = pow(o_color.rgb, %ff);\n" % (gamma)
+            )
+
+        return self.reconfigure(True, "GammaAdjust")
 
     def delGammaAdjust(self):
-        if "GammaAdjust" in self.configuration:
-            old_gamma = self.configuration["GammaAdjust"]
-            del self.configuration["GammaAdjust"]
-            return self.reconfigure((old_gamma != 1.0), "GammaAdjust")
-        return True
+        self.del_filter("GammaAdjust")
 
     def setSrgbEncode(self, force=False):
         """ Applies the inverse sRGB EOTF to the output, unless the window
@@ -868,13 +879,12 @@ class CommonFilters:
 
     def set_chromatic_aberration(self, r=1.07, g=1.05, b=1.03):
 
-        coords = self.texcoords["color"]
         self.load_filter(
             "chromatic aberration",
             f"""
-        float r = tex2D(k_txcolor, {coords}.xy / chromatic_offset_r).r;
-        float g = tex2D(k_txcolor, {coords}.xy / chromatic_offset_g).g;
-        float b = tex2D(k_txcolor, {coords}.xy / chromatic_offset_b).b;
+        float r = tex2D(k_txcolor, l_texcoord_color.xy / chromatic_offset_r).r;
+        float g = tex2D(k_txcolor, l_texcoord_color.xy / chromatic_offset_g).g;
+        float b = tex2D(k_txcolor, l_texcoord_color.xy / chromatic_offset_b).b;
         o_color = float4(r,g,b, o_color.a);""",
             uniforms=[
                 "float chromatic_offset_r",
@@ -890,6 +900,15 @@ class CommonFilters:
                                                     "chromatic_offset_b"], ["float2 chromatic_offset_g",
                                                                             "float2 chromatic_offset_g",
                                                                             "float2 chromatic_offset_b"])
+
+    def set_vignette(self, radius,vignette_strength=0.2, order=15):
+        self.load_filter("Vignette", """ 
+        float vignette_amount = length(l_fragpos - 0.5) - (1 - vignette_radius);
+        o_color.rgb *= 1.0 - smoothstep(0.0, 1 - vignette_strength, vignette_amount );
+""",
+                         uniforms = ["float vignette_radius", "float vignette_strength"],
+                         shader_inputs={"vignette_radius": radius, "vignette_strength": vignette_strength},
+                         order=order)
 
     #snake_case alias:
     set_msaa = setMSAA
@@ -942,6 +961,9 @@ if __name__ == "__main__":
     c.set_high_dynamic_range()
 
     c.set_chromatic_aberration()
+    c.set_gamma_adjust(1.4)
+    c.set_vignette(0.4, 0.6, order=15)
+
     for count, line in enumerate(c.current_text.split("\n")):
         print(count, line)
 
