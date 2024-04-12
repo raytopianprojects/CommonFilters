@@ -567,10 +567,9 @@ o_color = lerp(o_color, k_cartooncolor, cartoon_thresh);""",
         # Uniforms cartoonseparation, cartooncolor
 
     def delCartoonInk(self):
-        if "CartoonInk" in self.configuration:
-            del self.configuration["CartoonInk"]
-            return self.reconfigure(True, "CartoonInk")
-        return True
+        self.del_filter("CartoonInk", uniforms=["float4 k_cartoonseparation",
+                      "float4 k_cartooncolor",
+                      "float4 texpix_txaux"], )
 
     def setBloom(self, blend=(0.3, 0.4, 0.3, 0.0), mintrigger=0.6, maxtrigger=1.0, desat=0.6, intensity=1.0,
                  size="medium"):
@@ -672,7 +671,7 @@ o_color = lerp(o_color, k_cartooncolor, cartoon_thresh);""",
                          )
 
     def delBloom(self):
-        ...
+        self.del_filter("Bloom")
 
     def setHalfPixelShift(self):
         fullrebuild = ("HalfPixelShift" not in self.configuration)
@@ -757,11 +756,7 @@ o_color = lerp(o_color, k_cartooncolor, cartoon_thresh);""",
         )
 
     def delBlurSharpen(self):
-        # TODO Del Filter
-        if "BlurSharpen" in self.configuration:
-            del self.configuration["BlurSharpen"]
-            return self.reconfigure(True, "BlurSharpen")
-        return True
+        self.del_filter("BlurSharpen", inputs=["blurval"], uniforms=["float4 k_blurval"])
 
     def setAmbientOcclusion(self, numsamples=16, radius=0.05, amount=2.0, strength=0.01, falloff=0.000002):
         fullrebuild = ("AmbientOcclusion" not in self.configuration)
@@ -947,7 +942,6 @@ if __name__ == "__main__":
     p.set_pos((0, 100, 0))
     p.reparent_to(s.render)
     c = CommonFilters(s.win, s.cam)
-    #c.setBlurSharpen(0.5)
 
     #c.add_uniform("float raise_amount")
     #c.add_shader_inputs({"raise_amount": 0.1})
@@ -962,12 +956,17 @@ if __name__ == "__main__":
 
     # c.setMSAA(8)
     # c.delMSAA()
-    #c.set_chromatic_aberration()
 
+    #c.set_chromatic_aberration()
     c.set_bloom()
+
+    s.accept("d", c.del_bloom)
+
+    #c.setBlurSharpen(0.5)
 
     #c.set_gamma_adjust(1.4)
     #c.set_vignette(0.4, 0.6, order=15)
+    #c.set_cartoon_ink()
 
     for count, line in enumerate(c.current_text.split("\n")):
         print(count, line)
