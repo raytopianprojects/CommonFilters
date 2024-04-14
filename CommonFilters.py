@@ -35,18 +35,6 @@ from direct.filter.filterBlurY import BLUR_Y
 from direct.filter.filterCopy import COPY
 from direct.filter.filterDown4 import DOWN_4
 
-CARTOON_BODY = """
-float4 cartoondelta = k_cartoonseparation * texpix_txaux.xwyw;
-float4 cartoon_c0 = tex2D(k_txaux, %(texcoord)s + cartoondelta.xy);
-float4 cartoon_c1 = tex2D(k_txaux, %(texcoord)s - cartoondelta.xy);
-float4 cartoon_c2 = tex2D(k_txaux, %(texcoord)s + cartoondelta.wz);
-float4 cartoon_c3 = tex2D(k_txaux, %(texcoord)s - cartoondelta.wz);
-float4 cartoon_mx = max(cartoon_c0, max(cartoon_c1, max(cartoon_c2, cartoon_c3)));
-float4 cartoon_mn = min(cartoon_c0, min(cartoon_c1, min(cartoon_c2, cartoon_c3)));
-float cartoon_thresh = saturate(dot(cartoon_mx - cartoon_mn, float4(3,3,0,0)) - 0.5);
-o_color = lerp(o_color, k_cartooncolor, cartoon_thresh);
-"""
-
 # Some GPUs do not support variable-length loops.
 #
 # We fill in the actual value of numsamples in the loop limit
@@ -111,6 +99,7 @@ class CommonFilters:
     filters.  The constructor requires a filter builder as a parameter. """
 
     def __init__(self, win, cam):
+        self.clamping = None
         self.finalQuad = None
         self.texcoords = {}
         self.texcoordPadding = {}
@@ -125,7 +114,6 @@ class CommonFilters:
         self.uniforms = []
         self.shader_inputs = {}
         self.render_textures = {}
-        self.auxbits = 0
         self.fbprops = FrameBufferProperties()
 
     def cleanup(self):
@@ -141,6 +129,7 @@ class CommonFilters:
 
     def load_filter(self, name, shader_string,
                     uniforms=None,
+                    consts=None,
                     shader_inputs=None,
                     needed_textures=None,
                     needed_coords=None,
@@ -151,21 +140,29 @@ class CommonFilters:
 
         if uniforms:
             for uniform in uniforms:
-                self.add_uniform(uniform, reconfigure=False)
+                self.add_uniform(uniform)
+
+        self.filters[name] = {"shader": None, "uniforms": uniforms, "needed_textures": needed_textures,
+                              "needed_coords": needed_coords,
+                              "render_into": render_into, "auxbits": auxbits, "order": None,
+                              "consts": consts}
+
+        if shader_inputs:
+            self.filters[name]["shader_inputs"] = shader_inputs.keys()
+        else:
+            self.filters[name]["shader_inputs"] = shader_inputs
 
         if is_filepath:
-            if order:
-                self.filters[name] = [vfs.get_file(shader_string), order]
-            else:
-                self.filters[name] = [vfs.get_file(shader_string), len(self.filters)]
+            self.filters[name]["shader"] = vfs.get_file(shader_string)
         else:
-            if order:
-                self.filters[name] = [shader_string, order]
-            else:
-                self.filters[name] = [shader_string, len(self.filters)]
+            self.filters[name]["shader"] = shader_string
 
-        self.reconfigure(True, None, needed_textures=needed_textures, needed_coords=needed_coords,
-                         render_into=render_into, auxbits=auxbits)
+        if order:
+            self.filters[name]["order"] = order
+        else:
+            self.filters[name]["order"] = len(self.filters)
+
+        self.reconfigure()
 
         if shader_inputs:
             self.set_shader_inputs(shader_inputs)
@@ -173,23 +170,23 @@ class CommonFilters:
     def add_uniform(self, string, reconfigure=True):
         self.uniforms.append(string)
         if reconfigure:
-            self.reconfigure(True, None)
+            self.reconfigure()
 
-    def del_uniforms(self, uniforms, reconfigure=True):
+    def del_uniforms(self, uniforms):
         for uniform in uniforms:
             if uniform in self.uniforms:
                 self.uniforms.remove(uniform)
-        self.reconfigure(reconfigure, None)
+        self.reconfigure()
 
-    def del_filter(self, name, inputs=None, uniforms=None):
+    def del_filter(self, name):
         if name in self.filters:
+            filter = self.filters[name]
+            if filter["shader_inputs"]:
+                self.del_shader_inputs(filter["shader_inputs"])
+            if filter["uniforms"]:
+                self.del_uniforms(filter["uniforms"])
             del self.filters[name]
-        if inputs:
-            self.del_shader_inputs(inputs, reconfigure=False)
-        if uniforms:
-            self.del_uniforms(uniforms, reconfigure=False)
-
-        self.reconfigure(True, None)
+            self.reconfigure()
 
     def set_shader_inputs(self, inputs):
         self.shader_inputs.update(inputs)
@@ -199,14 +196,13 @@ class CommonFilters:
         self.shader_inputs[name] = value
         self.finalQuad.setShaderInput(name, value)
 
-    def del_shader_inputs(self, inputs, reconfigure=True):
+    def del_shader_inputs(self, inputs):
         for input in inputs:
             if input in self.shader_inputs:
                 del self.shader_inputs[input]
-        self.reconfigure(reconfigure, None)
+        self.reconfigure()
 
-    def reconfigure(self, fullrebuild, changed, needed_textures=None, needed_coords=None, render_into=None,
-                    auxbits=None):
+    def reconfigure(self):
         """ Reconfigure is called whenever any configuration change is made. """
         configuration = self.configuration
 
@@ -215,133 +211,91 @@ class CommonFilters:
         if not self.manager.win.gsg.getSupportsBasicShaders():
             return False
 
-        self.auxbits = 0
-
-        if auxbits:
-            for auxbit in auxbits:
-                self.auxbits |= auxbit
+        auxbits = 0
 
         needtex = {"color"}
         needtexcoord = {"color"}
 
-        if needed_textures:
-            for texture in needed_textures:
-                needtex.add(texture)
-
-        if needed_coords:
-            for coords in needed_coords:
-                needtexcoord.add(coords)
-
-        if "AmbientOcclusion" in configuration:
-            needtex.add("depth")
-            needtex.add("ssao0")
-            needtex.add("ssao1")
-            needtex.add("ssao2")
-            needtex.add("aux")
-            self.auxbits |= AuxBitplaneAttrib.ABOAuxNormal
-            needtexcoord.add("ssao2")
-
-        if "ViewGlow" in configuration:
-            self.auxbits |= AuxBitplaneAttrib.ABOGlow
-
-        if "VolumetricLighting" in configuration:
-            needtex.add(configuration["VolumetricLighting"].source)
+        for settings in self.filters.values():
+            if settings["auxbits"]:
+                for auxbit in settings["auxbits"]:
+                    auxbits |= auxbit
+            if settings["needed_textures"]:
+                for texture in settings["needed_textures"]:
+                    needtex.add(texture)
+            if settings["needed_coords"]:
+                for coords in settings["needed_coords"]:
+                    needtexcoord.add(coords)
 
         for tex in needtex:
             self.textures[tex] = Texture("scene-" + tex)
             self.textures[tex].setWrapU(Texture.WMClamp)
             self.textures[tex].setWrapV(Texture.WMClamp)
 
-        fbprops = None
-        clamping = None
-        if "HighDynamicRange" in configuration:
-            fbprops = FrameBufferProperties()
-            fbprops.setFloatColor(True)
-            fbprops.setSrgbColor(False)
-            clamping = False
-
-        self.finalQuad = self.manager.renderSceneInto(textures=self.textures, auxbits=self.auxbits, fbprops=fbprops,
-                                                      clamping=clamping)
+        self.finalQuad = self.manager.renderSceneInto(textures=self.textures, auxbits=auxbits, fbprops=self.fbprops,
+                                                      clamping=self.clamping)
 
         if self.finalQuad is None:
             self.cleanup()
             return False
 
-        if render_into:
-            for render_name, settings in render_into.items():
+        for filter_settings in self.filters.values():
+            if filter_settings["render_into"]:
+                for render_name, settings in filter_settings["render_into"].items():
 
-                mul = settings.get("mul")
-                if not mul:
-                    mul = 1
+                    mul = settings.get("mul")
+                    if not mul:
+                        mul = 1
 
-                div = settings.get("div")
-                if not div:
-                    div = 1
+                    div = settings.get("div")
+                    if not div:
+                        div = 1
 
-                align = settings.get("align")
-                if not align:
-                    align = 1
+                    align = settings.get("align")
+                    if not align:
+                        align = 1
 
-                depthtex = settings.get("depthtex")
-                if type(depthtex) is dict:
-                    depthtex = self.textures[depthtex["texture"]]
+                    depthtex = settings.get("depthtex")
+                    if type(depthtex) is str:
+                        depthtex = self.textures[depthtex]
 
-                colortex = settings.get("colortex")
-                if type(colortex) is dict:
-                    colortex = self.textures[colortex["texture"]]
+                    colortex = settings.get("colortex")
+                    if type(colortex) is str:
+                        colortex = self.textures[colortex]
 
-                auxtex0 = settings.get("auxtex0")
-                if type(auxtex0) is dict:
-                    auxtex0 = self.textures[auxtex0["texture"]]
+                    auxtex0 = settings.get("auxtex0")
+                    if type(auxtex0) is str:
+                        auxtex0 = self.textures[auxtex0]
 
-                auxtex1 = settings.get("auxtex1")
-                if type(auxtex1) is dict:
-                    auxtex1 = self.textures[auxtex1["texture"]]
+                    auxtex1 = settings.get("auxtex1")
+                    if type(auxtex1) is str:
+                        auxtex1 = self.textures[auxtex1]
 
-                fbprops = settings.get("fbprops")
+                    fbprops = settings.get("fbprops")
 
-                quad = self.manager.renderQuadInto(render_name,
-                                                   mul=mul,
-                                                   align=align,
-                                                   div=div,
-                                                   depthtex=depthtex,
-                                                   colortex=colortex,
-                                                   auxtex0=auxtex0,
-                                                   auxtex1=auxtex1,
-                                                   fbprops=fbprops)
+                    quad = self.manager.renderQuadInto(render_name,
+                                                       mul=mul,
+                                                       align=align,
+                                                       div=div,
+                                                       depthtex=depthtex,
+                                                       colortex=colortex,
+                                                       auxtex0=auxtex0,
+                                                       auxtex1=auxtex1,
+                                                       fbprops=fbprops)
 
-                self.render_textures[render_name] = quad
+                    self.render_textures[render_name] = quad
 
-                shader = settings.get("shader")
-                if shader:
-                    quad.set_shader(shader)
+                    shader = settings.get("shader")
+                    if shader:
+                        quad.set_shader(shader)
 
-                shader_inputs = settings.get("shader_inputs")
-                if shader_inputs:
-                    for name, value in shader_inputs.items():
-                        if type(value) is dict:
-                            if "texture" in value:
-                                value = self.textures[value["texture"]]
-                        quad.set_shader_input(name, value)
+                    shader_inputs = settings.get("shader_inputs")
+                    if shader_inputs:
+                        for name, value in shader_inputs.items():
+                            if type(value) is str:
+                                value = self.textures[value]
+                            quad.set_shader_input(name, value)
 
-        if "AmbientOcclusion" in configuration:
-            ssao0 = self.textures["ssao0"]
-            ssao1 = self.textures["ssao1"]
-            ssao2 = self.textures["ssao2"]
-            self.ssao.append(self.manager.renderQuadInto("filter-ssao0", colortex=ssao0))
-            self.ssao.append(self.manager.renderQuadInto("filter-ssao1", colortex=ssao1, div=2))
-            self.ssao.append(self.manager.renderQuadInto("filter-ssao2", colortex=ssao2))
-            self.ssao[0].setShaderInput("depth", self.textures["depth"])
-            self.ssao[0].setShaderInput("normal", self.textures["aux"])
-            self.ssao[0].setShaderInput("random", base.loader.loadTexture("maps/random.rgb"))
-            self.ssao[0].setShader(
-                Shader.make(SSAO_BODY % configuration["AmbientOcclusion"].numsamples, Shader.SL_Cg))
-            self.ssao[1].setShaderInput("src", ssao0)
-            self.ssao[1].setShader(Shader.make(BLUR_X, Shader.SL_Cg))
-            self.ssao[2].setShaderInput("src", ssao1)
-            self.ssao[2].setShader(Shader.make(BLUR_Y, Shader.SL_Cg))
-
-        print(needtexcoord, "Needtexcoord")
         for tex in needtexcoord:
             if self.textures[tex].getAutoTextureScale() != ATSNone or "HalfPixelShift" in configuration:
                 self.texcoords[tex] = "l_texcoord_" + tex
@@ -351,22 +305,15 @@ class CommonFilters:
                 self.texcoords[tex] = "l_texcoord"
                 self.texcoordPadding["l_texcoord"] = None
 
-        print(self.texcoords, "self.texcoords")
         texcoordSets = list(enumerate(self.texcoordPadding.keys()))
 
         text = "//Cg\n"
 
-        if "HighDynamicRange" in configuration:
-            text += """static const float3x3 aces_input_mat = {
-                      {0.59719, 0.35458, 0.04823},
-                      {0.07600, 0.90834, 0.01566},
-                      {0.02840, 0.13383, 0.83777},
-                    };
-                    static const float3x3 aces_output_mat = {
-                      { 1.60475, -0.53108, -0.07367},
-                      {-0.10208,  1.10813, -0.00605},
-                      {-0.00327, -0.07276,  1.07602},
-                    };"""
+        # Add any global constants
+        for settings in self.filters.values():
+            if settings["consts"]:
+                for const in settings["consts"]:
+                    text += const
 
         text += "void vshader(float4 vtx_position : POSITION,\n"
         text += "  out float4 l_position : POSITION,\n"
@@ -375,7 +322,7 @@ class CommonFilters:
         for texcoord, padTex in self.texcoordPadding.items():
             if padTex is not None:
                 text += "  uniform float4 texpad_tx%s,\n" % (padTex)
-                if "HalfPixelShift" in configuration:
+                if "HalfPixelShift" in self.configuration:
                     text += "  uniform float4 texpix_tx%s,\n" % (padTex)
 
         for i, name in texcoordSets:
@@ -399,7 +346,7 @@ class CommonFilters:
             else:
                 text += "  %s = (%s * texpad_tx%s.xy) + texpad_tx%s.xy;\n" % (texcoord, pos, padTex, padTex)
 
-                if "HalfPixelShift" in configuration:
+                if "HalfPixelShift" in self.configuration:
                     text += "  %s += texpix_tx%s.xy * 0.5;\n" % (texcoord, padTex)
 
         text += "l_fragpos = l_position;"
@@ -414,13 +361,7 @@ class CommonFilters:
         for key in self.textures:
             text += "  uniform sampler2D k_tx" + key + ",\n"
 
-        if "VolumetricLighting" in configuration:
-            text += "  uniform float4 k_casterpos,\n"
-            text += "  uniform float4 k_vlparams,\n"
-
-        if "ExposureAdjust" in configuration:
-            text += "  uniform float k_exposure,\n"
-
+        # Add all uniforms
         for uniform in self.uniforms:
             text += f"uniform {uniform},\n"
 
@@ -429,51 +370,9 @@ class CommonFilters:
         text += """        l_fragpos /= l_fragpos.w; l_fragpos.xy = (l_fragpos.xy + 1) / 2;"""
         text += "  o_color = tex2D(k_txcolor, %s);\n" % (self.texcoords["color"])
 
-        user_filters = sorted(self.filters.values(), key=lambda l: l[1])
+        user_filters = sorted(self.filters.values(), key=lambda l: l["order"])
         for user_filter in user_filters:
-            text += user_filter[0]
-
-        if "AmbientOcclusion" in configuration:
-            text += "  o_color *= tex2D(k_txssao2, %s).r;\n" % (self.texcoords["ssao2"])
-        if "ViewGlow" in configuration:
-            text += "  o_color.r = o_color.a;\n"
-        if "VolumetricLighting" in configuration:
-            text += "  float decay = 1.0f;\n"
-            text += "  float2 curcoord = %s;\n" % (self.texcoords["color"])
-            text += "  float2 lightdir = curcoord - k_casterpos.xy;\n"
-            text += "  lightdir *= k_vlparams.x;\n"
-            text += "  half4 sample = tex2D(k_txcolor, curcoord);\n"
-            text += "  float3 vlcolor = sample.rgb * sample.a;\n"
-            text += "  for (int i = 0; i < %s; i++) {\n" % (int(configuration["VolumetricLighting"].numsamples))
-            text += "    curcoord -= lightdir;\n"
-            text += "    sample = tex2D(k_tx%s, curcoord);\n" % (configuration["VolumetricLighting"].source)
-            text += "    sample *= sample.a * decay;//*weight\n"
-            text += "    vlcolor += sample.rgb;\n"
-            text += "    decay *= k_vlparams.y;\n"
-            text += "  }\n"
-            text += "  o_color += float4(vlcolor * k_vlparams.z, 1);\n"
-
-        if "ExposureAdjust" in configuration:
-            text += "  o_color.rgb *= k_exposure;\n"
-
-        # With thanks to Stephen Hill!
-        if "HighDynamicRange" in configuration:
-            text += "  float3 aces_color = mul(aces_input_mat, o_color.rgb);\n"
-            text += "  o_color.rgb = saturate(mul(aces_output_mat, (aces_color * (aces_color + 0.0245786f) - 0.000090537f) / (aces_color * (0.983729f * aces_color + 0.4329510f) + 0.238081f)));\n"
-
-        if "GammaAdjust" in configuration:
-            gamma = configuration["GammaAdjust"]
-            if gamma == 0.5:
-                text += "  o_color.rgb = sqrt(o_color.rgb);\n"
-            elif gamma == 2.0:
-                text += "  o_color.rgb *= o_color.rgb;\n"
-            elif gamma != 1.0:
-                text += "  o_color.rgb = pow(o_color.rgb, %ff);\n" % (gamma)
-
-        if "SrgbEncode" in configuration:
-            text += "  o_color.r = (o_color.r < 0.0031308) ? (o_color.r * 12.92) : (1.055 * pow(o_color.r, 0.41666) - 0.055);\n"
-            text += "  o_color.g = (o_color.g < 0.0031308) ? (o_color.g * 12.92) : (1.055 * pow(o_color.g, 0.41666) - 0.055);\n"
-            text += "  o_color.b = (o_color.b < 0.0031308) ? (o_color.b * 12.92) : (1.055 * pow(o_color.b, 0.41666) - 0.055);\n"
+            text += user_filter["shader"]
 
         text += "}\n"
 
@@ -487,24 +386,6 @@ class CommonFilters:
             self.finalQuad.setShaderInput("tx" + tex, self.textures[tex])
 
         self.task = taskMgr.add(self.update, "common-filters-update")
-
-        if changed == "VolumetricLighting" or fullrebuild:
-            if "VolumetricLighting" in configuration:
-                config = configuration["VolumetricLighting"]
-                tcparam = config.density / float(config.numsamples)
-                self.finalQuad.setShaderInput("vlparams", tcparam, config.decay, config.exposure, 0.0)
-
-        if changed == "AmbientOcclusion" or fullrebuild:
-            if "AmbientOcclusion" in configuration:
-                config = configuration["AmbientOcclusion"]
-                self.ssao[0].setShaderInput("params1", config.numsamples, -float(config.amount) / config.numsamples,
-                                            config.radius, 0)
-                self.ssao[0].setShaderInput("params2", config.strength, config.falloff, 0, 0)
-
-        if changed == "ExposureAdjust" or fullrebuild:
-            if "ExposureAdjust" in configuration:
-                stops = configuration["ExposureAdjust"]
-                self.finalQuad.setShaderInput("exposure", 2 ** stops)
 
         self.finalQuad.setShaderInputs(**self.shader_inputs)
 
@@ -542,7 +423,6 @@ class CommonFilters:
 
     def delMSAA(self):
         self.fbprops.setMultisamples(0)
-        # Somehow remove fbprop from final quad
 
     def setCartoonInk(self, separation=1, color=(0, 0, 0, 1)):
         self.load_filter(
@@ -561,15 +441,14 @@ o_color = lerp(o_color, k_cartooncolor, cartoon_thresh);""",
                       "float4 texpix_txaux"],
             auxbits=[AuxBitplaneAttrib.ABOAuxNormal],
             needed_textures=["aux"],
-            needed_coords=["aux"], order=3, shader_inputs={"cartoonseparation": separation, "cartooncolor": color}
+            needed_coords=["aux"],
+            shader_inputs={"cartoonseparation": (separation, 0, separation, 0), "cartooncolor": color}
         )
 
         # Uniforms cartoonseparation, cartooncolor
 
     def delCartoonInk(self):
-        self.del_filter("CartoonInk", uniforms=["float4 k_cartoonseparation",
-                      "float4 k_cartooncolor",
-                      "float4 texpix_txaux"], )
+        self.del_filter("CartoonInk")
 
     def setBloom(self, blend=(0.3, 0.4, 0.3, 0.0), mintrigger=0.6, maxtrigger=1.0, desat=0.6, intensity=1.0,
                  size="medium"):
@@ -622,41 +501,41 @@ o_color = lerp(o_color, k_cartooncolor, cartoon_thresh);""",
                                              "blend": (blend[0], blend[1], blend[2], blend[3] * 2.0),
                                              "trigger": (mintrigger, 1.0 / (maxtrigger - mintrigger), 0.0, 0.0),
                                              "desat": desat,
-                                             "src": {"texture": "color"}
+                                             "src": "color"
                                          },
                                      "shader": Shader.make(BLOOM_I, Shader.SL_Cg),
-                                     "colortex": {"texture": "bloom0"},
+                                     "colortex": "bloom0",
                                      "div": 2,
                                      "align": scale
 
                                  },
                              downsamplerName:
                                  {
-                                     "colortex": {"texture": "bloom1"},
+                                     "colortex": "bloom1",
                                      "div": scale,
                                      "align": scale,
                                      "shader": Shader.make(downsampler, Shader.SL_Cg),
                                      "shader_inputs":
                                          {
-                                             "src": {"texture": "bloom0"}
+                                             "src": "bloom0"
                                          }
 
                                  },
                              "filter-bloomx":
                                  {
-                                     "colortex": {"texture": "bloom2"},
+                                     "colortex": "bloom2",
                                      "div": scale,
                                      "align": scale,
                                      "shader": Shader.make(BLOOM_X, Shader.SL_Cg),
                                      "shader_inputs":
                                          {
-                                             "src": {"texture": "bloom1"}
+                                             "src": "bloom1"
                                          }
 
                                  },
                              "filter-bloomy":
                                  {
-                                     "colortex": {"texture": "bloom3"},
+                                     "colortex": "bloom3",
                                      "div": scale,
                                      "align": scale,
                                      "shader": Shader.make(BLOOM_Y, Shader.SL_Cg),
@@ -664,7 +543,7 @@ o_color = lerp(o_color, k_cartooncolor, cartoon_thresh);""",
                                      "shader_inputs":
                                          {
                                              "intensity": (intensity, intensity, intensity, intensity),
-                                             "src": {"texture": "bloom2"}
+                                             "src": "bloom2"
                                          }
                                  }
                          }
@@ -676,53 +555,56 @@ o_color = lerp(o_color, k_cartooncolor, cartoon_thresh);""",
     def setHalfPixelShift(self):
         fullrebuild = ("HalfPixelShift" not in self.configuration)
         self.configuration["HalfPixelShift"] = 1
-        return self.reconfigure(fullrebuild, "HalfPixelShift")
+        return self.reconfigure()
 
     def delHalfPixelShift(self):
         if "HalfPixelShift" in self.configuration:
             del self.configuration["HalfPixelShift"]
-            return self.reconfigure(True, "HalfPixelShift")
+            return self.reconfigure()
         return True
 
     def setViewGlow(self):
-        fullrebuild = ("ViewGlow" not in self.configuration)
-        self.configuration["ViewGlow"] = 1
-        return self.reconfigure(fullrebuild, "ViewGlow")
+
+        self.load_filter("ViewGlow", shader_string="o_color.r = o_color.a;", auxbits=[AuxBitplaneAttrib.ABOAuxGlow])
 
     def delViewGlow(self):
-        if "ViewGlow" in self.configuration:
-            del self.configuration["ViewGlow"]
-            return self.reconfigure(True, "ViewGlow")
-        return True
+        self.del_filter("ViewGlow")
 
-    def setInverted(self):
-        self.load_filter("Inverted", "  o_color = float4(1, 1, 1, 1) - o_color;\n", order=14)
-
-        return self.reconfigure(True, "Inverted")
+    def setInverted(self, order=None):
+        self.load_filter("Inverted", "  o_color = float4(1, 1, 1, 1) - o_color;\n", order=order)
 
     def delInverted(self):
         self.del_filter("Inverted")
 
     def setVolumetricLighting(self, caster, numsamples=32, density=5.0, decay=0.1, exposure=0.1, source="color"):
-        oldconfig = self.configuration.get("VolumetricLighting", None)
-        fullrebuild = True
-        if oldconfig and oldconfig.source == source and oldconfig.numsamples == int(numsamples):
-            fullrebuild = False
-        newconfig = FilterConfig()
-        newconfig.caster = caster
-        newconfig.numsamples = int(numsamples)
-        newconfig.density = density
-        newconfig.decay = decay
-        newconfig.exposure = exposure
-        newconfig.source = source
-        self.configuration["VolumetricLighting"] = newconfig
-        return self.reconfigure(fullrebuild, "VolumetricLighting")
+        config = FilterConfig()
+        config.caster = caster
+        self.configuration["VolumetricLighting"] = config
+
+        self.load_filter("VolumetricLighting",
+                         uniforms=["float volume_light_numsamples",
+                                   "float4 k_casterpos",
+                                   "float4 k_vlparams"],
+                         needed_textures=[source],
+                         shader_string="""float decay = 1.0f;
+          float2 curcoord = l_texcoord_color; 
+          float2 lightdir = curcoord - k_casterpos.xy;\n
+          lightdir *= k_vlparams.x;
+          half4 sample = tex2D(k_txcolor, curcoord);
+          float3 vlcolor = sample.rgb * sample.a;
+          for (int i = 0; i < volume_light_numsamples; i++) {
+            curcoord -= lightdir;
+            sample = tex2D(k_tx@color, curcoord);
+            sample *= sample.a * decay;
+            vlcolor += sample.rgb;
+            decay *= k_vlparams.y;
+          }
+          o_color += float4(vlcolor * k_vlparams.z, 1);""".replace("@color", source),
+                         shader_inputs={"volume_light_numsamples": numsamples,
+                                        "vlparams": (density / float(numsamples), decay, exposure)})
 
     def delVolumetricLighting(self):
-        if "VolumetricLighting" in self.configuration:
-            del self.configuration["VolumetricLighting"]
-            return self.reconfigure(True, "VolumetricLighting")
-        return True
+        self.del_filter("VolumetricLighting")
 
     def setBlurSharpen(self, amount=0.0):
         """Enables the blur/sharpen filter. If the 'amount' parameter is 1.0, it will not have any effect.
@@ -737,18 +619,18 @@ o_color = lerp(o_color, k_cartooncolor, cartoon_thresh);""",
             needed_coords=["blur1"],
             render_into={
                 "filter-blur0": {
-                    "colortex": {"texture": "blur0"},
+                    "colortex": "blur0",
                     "div": 2,
                     "shader_inputs": {
-                        "src": {"texture": "color"}
+                        "src": "color"
                     },
                     "shader": Shader.make(BLUR_X, Shader.SL_Cg)
                 },
                 "filter-blur1": {
-                    "colortex": {"texture": "blur1"},
+                    "colortex": "blur1",
                     "shader_inputs":
                         {
-                            "src": {"texture": "blur0"}
+                            "src": "blur0"
                         },
                     "shader": Shader.make(BLUR_Y, Shader.SL_Cg)
                 }
@@ -756,28 +638,48 @@ o_color = lerp(o_color, k_cartooncolor, cartoon_thresh);""",
         )
 
     def delBlurSharpen(self):
-        self.del_filter("BlurSharpen", inputs=["blurval"], uniforms=["float4 k_blurval"])
+        self.del_filter("BlurSharpen")
 
     def setAmbientOcclusion(self, numsamples=16, radius=0.05, amount=2.0, strength=0.01, falloff=0.000002):
-        fullrebuild = ("AmbientOcclusion" not in self.configuration)
+        self.load_filter("AmbientOcclusion",
+                         shader_string="o_color *= tex2D(k_txssao2, l_texcoord_ssao2).r;\n",
+                         needed_textures=["ssao0", "ssao1", "ssao2", "depth", "aux"],
+                         needed_coords=["ssao2"],
+                         auxbits=[AuxBitplaneAttrib.ABOAuxNormal],
+                         render_into={
+                             "filter-ssao0": {
+                                 "colortex": "ssao0",
+                                 "shader_inputs": {
+                                     "depth": "depth",
+                                     "params1": (numsamples, -amount / numsamples, radius, 0),
+                                     "params2": (strength, falloff, 0, 0),
+                                     "normal": "aux",
+                                     "random": base.loader.loadTexture("maps/random.rgb"),
 
-        if not fullrebuild:
-            fullrebuild = (numsamples != self.configuration["AmbientOcclusion"].numsamples)
+                                 },
+                                 "shader": Shader.make(SSAO_BODY % numsamples, Shader.SL_Cg)
+                             },
+                             "filter-ssao1": {
+                                 "colortex": "ssao1",
+                                 "shader_inputs": {
+                                     "src": "ssao0",
 
-        newconfig = FilterConfig()
-        newconfig.numsamples = numsamples
-        newconfig.radius = radius
-        newconfig.amount = amount
-        newconfig.strength = strength
-        newconfig.falloff = falloff
-        self.configuration["AmbientOcclusion"] = newconfig
-        return self.reconfigure(fullrebuild, "AmbientOcclusion")
+                                 },
+                                 "div": 2,
+                                 "shader": Shader.make(BLUR_X, Shader.SL_Cg)
+                             },
+                             "filter-ssao2": {
+                                 "colortex": "ssao2",
+                                 "shader_inputs":
+                                     {
+                                         "src":  "ssao1",
+                                     },
+                                 "shader": Shader.make(BLUR_Y, Shader.SL_Cg)
+                             },
+                         })
 
     def delAmbientOcclusion(self):
-        if "AmbientOcclusion" in self.configuration:
-            del self.configuration["AmbientOcclusion"]
-            return self.reconfigure(True, "AmbientOcclusion")
-        return True
+        self.del_filter("AmbientOcclusion")
 
     def setGammaAdjust(self, gamma):
         """ Applies additional gamma correction to the image.  1.0 = no correction. """
@@ -797,10 +699,8 @@ o_color = lerp(o_color, k_cartooncolor, cartoon_thresh);""",
         elif gamma != 1.0:
             self.load_filter(
                 "GammaAdjust",
-                "  o_color.rgb = pow(o_color.rgb, %ff);\n" % (gamma)
+                "  o_color.rgb = pow(o_color.rgb, %ff);\n" % gamma
             )
-
-        return self.reconfigure(True, "GammaAdjust")
 
     def delGammaAdjust(self):
         self.del_filter("GammaAdjust")
@@ -814,22 +714,14 @@ o_color = lerp(o_color, k_cartooncolor, cartoon_thresh);""",
 
         .. versionadded:: 1.10.7
         """
-        new_enable = force or not self.manager.win.getFbProperties().getSrgbColor()
-        old_enable = self.configuration.get("SrgbEncode", False)
-        if new_enable and not old_enable:
-            self.configuration["SrgbEncode"] = True
-            return self.reconfigure(True, "SrgbEncode")
-        elif not new_enable and old_enable:
-            del self.configuration["SrgbEncode"]
-        return new_enable
+        self.load_filter("SRBGEncode", shader_string="""
+        o_color.r = (o_color.r < 0.0031308) ? (o_color.r * 12.92) : (1.055 * pow(o_color.r, 0.41666) - 0.055);
+o_color.g = (o_color.g < 0.0031308) ? (o_color.g * 12.92) : (1.055 * pow(o_color.g, 0.41666) - 0.055);
+o_color.b = (o_color.b < 0.0031308) ? (o_color.b * 12.92) : (1.055 * pow(o_color.b, 0.41666) - 0.055);""")
 
     def delSrgbEncode(self):
         """ Reverses the effects of setSrgbEncode. """
-        if "SrgbEncode" in self.configuration:
-            old_enable = self.configuration["SrgbEncode"]
-            del self.configuration["SrgbEncode"]
-            return self.reconfigure(old_enable, "SrgbEncode")
-        return True
+        self.del_filter("SRBGEncode")
 
     def setHighDynamicRange(self):
         """ Enables HDR rendering by using a floating-point framebuffer,
@@ -841,16 +733,29 @@ o_color = lerp(o_color, k_cartooncolor, cartoon_thresh);""",
 
         .. versionadded:: 1.10.7
         """
-
-        fullrebuild = (("HighDynamicRange" in self.configuration) is False)
-        self.configuration["HighDynamicRange"] = 1
-        return self.reconfigure(fullrebuild, "HighDynamicRange")
+        self.fbprops.setFloatColor(True)
+        self.fbprops.setSrgbColor(False)
+        self.clamping = False
+        # With thanks to Stephen Hill!
+        self.load_filter("HighDynamicRange",
+                         shader_string="""float3 aces_color = mul(aces_input_mat, o_color.rgb);
+                         o_color.rgb = saturate(mul(aces_output_mat, 
+                         (aces_color * (aces_color + 0.0245786f) - 0.000090537f) / 
+                         (aces_color * (0.983729f * aces_color + 0.4329510f) + 0.238081f)));""",
+                         consts=[
+                             """static const float3x3 aces_input_mat = {
+                      {0.59719, 0.35458, 0.04823},
+                      {0.07600, 0.90834, 0.01566},
+                      {0.02840, 0.13383, 0.83777},
+                    };
+                    static const float3x3 aces_output_mat = {
+                      { 1.60475, -0.53108, -0.07367},
+                      {-0.10208,  1.10813, -0.00605},
+                      {-0.00327, -0.07276,  1.07602},
+                    };"""])
 
     def delHighDynamicRange(self):
-        if "HighDynamicRange" in self.configuration:
-            del self.configuration["HighDynamicRange"]
-            return self.reconfigure(True, "HighDynamicRange")
-        return True
+        self.del_filter("HighDynamicRange")
 
     def setExposureAdjust(self, stops):
         """ Sets a relative exposure adjustment to multiply with the result of
@@ -860,17 +765,11 @@ o_color = lerp(o_color, k_cartooncolor, cartoon_thresh);""",
 
         .. versionadded:: 1.10.7
         """
-        old_stops = self.configuration.get("ExposureAdjust")
-        if old_stops != stops:
-            self.configuration["ExposureAdjust"] = stops
-            return self.reconfigure(old_stops is None, "ExposureAdjust")
-        return True
+        self.load_filter("ExposureAdjust", shader_string="o_color.rgb *= k_exposure;", uniforms=["float k_exposure"],
+                         shader_inputs={"exposure": 2 ** stops})
 
     def delExposureAdjust(self):
-        if "ExposureAdjust" in self.configuration:
-            del self.configuration["ExposureAdjust"]
-            return self.reconfigure(True, "ExposureAdjust")
-        return True
+        self.del_filter("ExposureAdjust")
 
     def set_chromatic_aberration(self, r=1.07, g=1.05, b=1.03):
 
@@ -890,21 +789,58 @@ o_color = lerp(o_color, k_cartooncolor, cartoon_thresh);""",
         )
 
     def del_chromatic_aberration(self):
-        self.remove_filter("chromatic aberration", ["chromatic_offset_r",
-                                                    "chromatic_offset_g",
-                                                    "chromatic_offset_b"], ["float2 chromatic_offset_g",
-                                                                            "float2 chromatic_offset_g",
-                                                                            "float2 chromatic_offset_b"])
+        self.del_filter("chromatic aberration")
 
-    def set_vignette(self, radius, vignette_strength=0.2, order=15):
+    def set_vignette(self, radius, vignette_strength=0.2):
         self.load_filter("Vignette", """ 
         float vignette_amount = length(l_fragpos - 0.5) - (1 - vignette_radius);
         o_color.rgb *= 1.0 - smoothstep(0.0, 1 - vignette_strength, vignette_amount );
 """,
                          uniforms=["float vignette_radius", "float vignette_strength"],
                          shader_inputs={"vignette_radius": radius, "vignette_strength": vignette_strength},
-                         order=order)
+                         )
 
+    def del_vignette(self):
+        self.del_filter("Vignette")
+
+    def set_tint(self, tint):
+        self.load_filter("Tint", """o_color *= tint;""",
+                         uniforms=["float4 tint"],
+                         shader_inputs={"tint": tint},
+                         )
+
+    def del_tint(self):
+        self.del_filter("Tint")
+
+    def set_distortion(self, distortion_map):
+        self.load_filter("Distortion", """ o_color = tex2D(k_txcolor, l_texcoord_color * 
+        tex2D(distortion_map, l_texcoord_color));""",
+                         uniforms=["sampler2D distortion_map"],
+                         shader_inputs={"distortion_map": base.loader.load_texture(distortion_map)},
+                         )
+
+    def del_distortion(self):
+        self.del_filter("Distortion")
+
+    def set_(self, ):
+        self.load_filter("", """ 
+""",
+                         uniforms=[],
+                         shader_inputs={},
+                         )
+
+    def del_(self):
+        self.del_filter("")
+
+    def set_(self, ):
+        self.load_filter("", """ 
+    """,
+                         uniforms=[],
+                         shader_inputs={},
+                         )
+
+    def del_(self):
+        self.del_filter("")
     #snake_case alias:
     set_msaa = setMSAA
     del_msaa = delMSAA
@@ -936,6 +872,7 @@ o_color = lerp(o_color, k_cartooncolor, cartoon_thresh);""",
 
 if __name__ == "__main__":
     from direct.showbase.ShowBase import ShowBase
+    from panda3d.core import DirectionalLight
 
     s = ShowBase()
     p = s.loader.load_model("panda")
@@ -951,14 +888,13 @@ if __name__ == "__main__":
     #c.add_shader_input("increase_red", 0.1)
     #c.add_filter("increase red", "o_color.r += increase_red;", 0)
 
-    #c.setSrgbEncode()
     #c.set_high_dynamic_range()
 
     # c.setMSAA(8)
     # c.delMSAA()
 
     #c.set_chromatic_aberration()
-    c.set_bloom()
+    # c.set_bloom()
 
     s.accept("d", c.del_bloom)
 
@@ -966,7 +902,28 @@ if __name__ == "__main__":
 
     #c.set_gamma_adjust(1.4)
     #c.set_vignette(0.4, 0.6, order=15)
+    # c.set_cartoon_ink()
+    # c.set_view_glow()
+
+    #c.set_ambient_occlusion()
+
+    d = DirectionalLight("A")
+    dn = s.render.attach_new_node(d)
+    s.render.set_light(dn)
+    #c.set_volumetric_lighting(dn)
+    #c.set_exposure_adjust(4)
+    # c.set_high_dynamic_range()
+    #c.setSrgbEncode()
     #c.set_cartoon_ink()
+    #c.set_ambient_occlusion()
+    c.set_bloom()
+    #c.set_view_glow()
+    #c.set_volumetric_lighting(dn)
+    #c.set_exposure_adjust(4)
+    #c.set_high_dynamic_range()
+    #c.set_srgb_encode()
+    c.set_distortion("maps/noise.rgb")
+
 
     for count, line in enumerate(c.current_text.split("\n")):
         print(count, line)
